@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Archidekt → Animated Playbook</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #071109; --panel: #0c1610; --line: #2b4a33; --ichor: #8dff7a; --gold: #d4c08a; --bone: #efe6cf;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--bone);
+    font-family: "Source Sans 3", system-ui, sans-serif;
+    min-height: 100vh; padding: 24px 16px 48px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-family: Cinzel, serif; font-weight: 800; font-size: clamp(28px, 6vw, 42px); margin: 0 0 8px; color: #f4ebd4; }
+  h1 em { font-style: normal; color: var(--ichor); }
+  .sub { color: #b8c8b8; margin: 0 0 24px; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  input[type="url"], input[type="text"] {
+    width: 100%; padding: 12px 14px; border-radius: 12px;
+    border: 1px solid var(--line); background: #0b140c; color: var(--bone);
+    font-size: 16px; margin-bottom: 12px;
+  }
+  button {
+    background: #16321c; color: var(--ichor); border: 1px solid var(--ichor);
+    border-radius: 999px; padding: 12px 20px; font-weight: 700; font-size: 15px;
+    cursor: pointer; font-family: Cinzel, serif; letter-spacing: .04em;
+  }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--bone); border-color: var(--line); }
+  .status { margin: 16px 0; min-height: 1.4em; color: var(--gold); }
+  .status.error { color: #ff8a8a; }
+  .result { margin-top: 24px; }
+  .result a, .result button { margin-right: 8px; }
+  details { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; margin-top: 20px; }
+  summary { cursor: pointer; font-weight: 600; }
+  .note { font-size: 13px; color: #9aab9a; margin-top: 16px; line-height: 1.45; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Deck <em>Playbook</em></h1>
+  <p class="sub">Looking to teach a friend about your deck? Or just teaching a friend Magic for the first time? Follow these steps.</p>
+
+  <div class="panel" style="margin-bottom:20px">
+    <ol style="margin:0;padding-left:20px;line-height:1.5">
+      <li>Make sure your Archidekt deck is <strong>public</strong>.</li>
+      <li>Copy the share link.</li>
+      <li>Paste it below and click Generate.</li>
+      <li>Send your friend the playbook (or open it together).</li>
+    </ol>
+  </div>
+
+  <label for="url">Archidekt deck URL</label>
+  <input type="url" id="url" placeholder="https://archidekt.com/decks/123456" />
+  <button id="go">Generate Playbook</button>
+
+  
+
+  <div class="status" id="status"></div>
+  <div class="result" id="result" hidden></div>
+
+  <details>
+    <summary>How this works / troubleshooting</summary>
+    <p>Public Archidekt decks only. The tool fetches the deck via the public API (through a CORS proxy because Archidekt only allows localhost), extracts the commander and cards, then builds a self-contained HTML playbook.</p>
+    <p>The banner uses the deck’s featured art with a slow Ken-Burns zoom + gentle glow so it feels alive without needing video files.</p>
+    <p>If generation fails, make sure the deck is public and try again. You can also open the finished HTML offline once downloaded.</p>
+  </details>
+
+  <p class="note">Share this file with friends. They open it in any browser, paste their Archidekt link, and download the playbook. No accounts or installs required.</p>
+</div>
+
+<script>
+const statusEl = document.getElementById("status");
+const resultEl = document.getElementById("result");
+const goBtn = document.getElementById("go");
+
+function setStatus(msg, isError = false) {
+  statusEl.textContent = msg;
+  statusEl.className = "status" + (isError ? " error" : "");
+}
+
+function extractId(url) {
+  const m = url.match(/archidekt\.com\/decks\/(\d+)/i);
+  return m ? m[1] : null;
+}
+
+// Set this to your deployed proxy URL (Cloudflare Worker, etc.)
+const PROXY_BASE = "https://deck-proxy-101.derrick-morais.workers.dev";
+
+async function fetchDeck(id) {
+  const apiUrl = `https://archidekt.com/api/decks/${id}/`;
+  const proxyUrl = `${PROXY_BASE}/?url=${encodeURIComponent(apiUrl)}`;
+  const res = await fetch(proxyUrl);
+  if (!res.ok) throw new Error(`Proxy returned ${res.status}`);
+  return await res.json();
+}
+
+function getCardName(entry) {
+  return entry?.card?.oracleCard?.name || entry?.card?.name || "Unknown";
+}
+
+function findCommander(deck) {
+  const cards = deck.cards || [];
+  const cmd = cards.find(c => (c.categories || []).some(cat => /commander/i.test(cat)));
+  return cmd ? getCardName(cmd) : (deck.name || "Commander");
+}
+
+function groupByCategory(deck) {
+  const groups = {};
+  (deck.cards || []).forEach(c => {
+    const cats = c.categories || ["Other"];
+    cats.forEach(cat => {
+      if (!groups[cat]) groups[cat] = [];
+      groups[cat].push({ name: getCardName(c), qty: c.quantity || 1 });
+    });
+  });
+  return groups;
+}
+
+function buildPlaybookHTML(deck) {
+  const commander = findCommander(deck);
+  const featured = deck.featured || deck.customFeatured || "";
+  const groups = groupByCategory(deck);
+  const cards = deck.cards || [];
+
+  const cardIndex = cards.map(c => {
+    const oc = (c.card && c.card.oracleCard) || {};
+    return {
+      name: getCardName(c),
+      text: (oc.text || "").toLowerCase(),
+      type: ((oc.types || []).join(" ")).toLowerCase()
+    };
+  });
+  const allText = cardIndex.map(c => c.name + " " + c.text).join(" ").toLowerCase();
+
+  // Detect real themes with supporting cards
+  const themes = [];
+  const checks = [
+    { re: /initiative/, label: "Initiative", advice: "Take the Initiative and keep it. Cards that give it to you are your engine." },
+    { re: /dungeon|venture/, label: "Dungeons", advice: "Venture when you can. Completing rooms adds up." },
+    { re: /token/, label: "Tokens", advice: "Make tokens and use them to attack, block, or fuel other cards." },
+    { re: /dragon/, label: "Dragons", advice: "Ramp into big dragons. They fly and are hard to block." },
+    { re: /pest/, label: "Pests", advice: "Make pests. They can gain you life or be sacrificed for value." },
+    { re: /counter|\+1\/\+1/, label: "Counters", advice: "Put counters on your creatures and use cards that care about them." },
+    { re: /gain life|lifegain/, label: "Lifegain", advice: "Gain life and look for payoffs when you do." },
+    { re: /sacrifice|sac /, label: "Sacrifice", advice: "Sacrifice things on purpose for cards, life, or tokens." },
+    { re: /draw a card|draw cards/, label: "Card draw", advice: "Draw cards so you always have something to do." }
+  ];
+  checks.forEach(ch => {
+    const matches = cardIndex.filter(c => ch.re.test(c.text) || ch.re.test(c.name.toLowerCase()));
+    if (matches.length >= 2) themes.push({ ...ch, cards: matches.slice(0, 4).map(c => c.name) });
+  });
+
+  const mainTheme = themes[0];
+  const planText = mainTheme
+    ? `This deck wants to ${mainTheme.label.toLowerCase()}. ${mainTheme.advice} Key cards: ${mainTheme.cards.join(", ")}.`
+    : `Play ${commander} and use the rest of the deck to support it. Look at the biggest categories and try to advance them.`;
+
+  // Build concrete plays
+  const plays = themes.slice(0, 5).map(t => ({
+    title: t.label,
+    need: t.cards.join(", "),
+    steps: [
+      `Find one of: ${t.cards.slice(0, 3).join(", ")}.`,
+      t.advice,
+      "Do this when it is safe. Hold interaction if the table is scary."
+    ],
+    note: `${t.cards.length}+ cards in the list support this.`
+  }));
+
+  // Ramp play if present
+  const ramp = cardIndex.filter(c => /add \{|mana rock|search your library for a land|ramp/i.test(c.text)).slice(0, 3);
+  if (ramp.length >= 2) {
+    plays.unshift({
+      title: "Ramp into " + commander,
+      need: ramp.map(c => c.name).join(", "),
+      steps: ["Play a land.", "Cast a ramp card.", `Cast ${commander} when it feels safe.`],
+      note: "More mana means more options later."
+    });
+  }
+
+  const playHTML = plays.map(p => `
+    <details class="play">
+      <summary>
+        <div class="play-title">${p.title}</div>
+        <div class="play-need">Need: ${p.need}</div>
+      </summary>
+      <div class="body">
+        ${p.steps.map((s,i) => `<div class="step"><div class="n">${i+1}</div><p>${s}</p></div>`).join("")}
+        <div class="note">${p.note}</div>
+      </div>
+    </details>`).join("");
+
+  const isDragon = /dragon/.test(allText) || /dragon/.test(commander.toLowerCase());
+  const bannerClass = isDragon ? "banner dragon" : "banner";
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>How to Play ${commander}</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#071109; --panel:rgba(12,22,14,.94); --line:#2b4a33; --ichor:#8dff7a; --gold:#d4c08a; --bone:#efe6cf; }
+  body { margin:0; background:var(--bg); color:var(--bone); font-family:"Source Sans 3",system-ui,sans-serif; }
+  .banner { position:relative; height:min(42dvh,420px); min-height:220px; overflow:hidden; background:#0a1a0c; border-bottom:1px solid #3d6a45; }
+  .art { position:absolute; inset:-8%; width:116%; height:116%; object-fit:cover; object-position:center 30%; filter:brightness(.85) contrast(1.05); }
+  .banner.dragon .art { animation:flyin 3.5s ease-out forwards, idle 8s ease-in-out 3.5s infinite alternate; }
+  .banner .art { animation:settle 4s ease-out forwards, idle 10s ease-in-out 4s infinite alternate; }
+  @keyframes flyin { 0%{transform:translate(-25%,-15%) scale(1.25);} 100%{transform:translate(0,0) scale(1);} }
+  @keyframes settle { 0%{transform:scale(1.12);} 100%{transform:scale(1);} }
+  @keyframes idle { 0%{transform:scale(1);} 100%{transform:scale(1.03) translate(-.5%,-.5%);} }
+  .banner::after { content:""; position:absolute; inset:0; background:linear-gradient(180deg,transparent 35%,rgba(5,10,6,.95)); pointer-events:none; }
+  .banner-copy { position:absolute; left:0; right:0; bottom:0; padding:48px 16px 14px; z-index:2; }
+  .eyebrow { font-family:Cinzel,serif; letter-spacing:.22em; font-size:10px; color:var(--ichor); text-transform:uppercase; margin:0 0 4px; }
+  h1 { font-family:Cinzel,serif; font-weight:800; font-size:clamp(26px,7vw,42px); margin:0; color:#f4ebd4; line-height:.95; text-shadow:0 2px 10px rgba(0,0,0,.5); }
+  .sub { margin:6px 0 0; color:#d5dece; font-size:14px; }
+  nav { display:flex; gap:8px; overflow-x:auto; padding:10px 16px; background:#0a140c; border-bottom:1px solid var(--line); }
+  nav a { color:var(--bone); text-decoration:none; font-size:13px; padding:6px 12px; border:1px solid var(--line); border-radius:999px; white-space:nowrap; }
+  main { max-width:720px; margin:0 auto; padding:12px 16px 32px; }
+  h2 { font-family:Cinzel,serif; color:var(--gold); font-size:17px; margin:20px 0 10px; }
+  .goal, .panel { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:14px; }
+  .search { width:100%; padding:12px 14px; border-radius:12px; border:1px solid var(--line); background:#0b140c; color:var(--bone); font-size:16px; margin-bottom:10px; }
+  .play { background:var(--panel); border:1px solid var(--line); border-radius:16px; margin-bottom:8px; }
+  .play summary { padding:12px 14px; cursor:pointer; }
+  .play-title { font-weight:700; }
+  .play-need { font-size:13px; color:#b8c8b8; margin-top:2px; }
+  .play .body { padding:0 14px 12px; }
+  .step { display:flex; gap:10px; margin:6px 0; }
+  .step .n { background:var(--ichor); color:#071109; border-radius:50%; width:22px; height:22px; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; flex-shrink:0; }
+  .note { color:#9aab9a; font-size:13px; margin-top:6px; border-left:2px solid var(--ichor); padding-left:8px; }
+</style>
+</head>
+<body>
+  <header class="${bannerClass}">
+    ${featured ? `<img class="art" src="${featured}" alt="${commander}" onerror="this.style.display='none'" />` : ""}
+    <div class="banner-copy">
+      <p class="eyebrow">How to play</p>
+      <h1>${commander}</h1>
+      <p class="sub">${deck.name || ""}</p>
+    </div>
+  </header>
+  <nav>
+    <a href="#plan">The plan</a>
+    <a href="#turn">Your turn</a>
+    <a href="#plays">Plays</a>
+    <a href="#stuck">If you're stuck</a>
+  </nav>
+  <main>
+    <section id="plan">
+      <h2>The plan</h2>
+      <div class="goal"><p>${planText}</p></div>
+    </section>
+    <section id="turn">
+      <h2>Your turn, every turn</h2>
+      <div class="panel">
+        <div class="step"><div class="n">1</div><p>Check upkeep triggers and draw.</p></div>
+        <div class="step"><div class="n">2</div><p>Play a land.</p></div>
+        <div class="step"><div class="n">3</div><p>Cast something that pushes your main theme${mainTheme ? " (" + mainTheme.label.toLowerCase() + ")" : ""}.</p></div>
+        <div class="step"><div class="n">4</div><p>Attack if it looks safe.</p></div>
+        <div class="step"><div class="n">5</div><p>Hold interaction if you can.</p></div>
+      </div>
+    </section>
+    <section id="plays">
+      <h2>Plays</h2>
+      <input class="search" id="q" type="search" placeholder="Search a card…" />
+      ${playHTML || "<p>No specific plays detected.</p>"}
+    </section>
+    <section>
+      <h2>What's in the deck</h2>
+      <div class="panel">
+        <ul>${Object.entries(groups).filter(([k]) => !/commander/i.test(k)).map(([n,cs]) => `<li><strong>${n}</strong> (${cs.length}): ${cs.slice(0,4).map(c=>c.name).join(", ")}${cs.length>4?"…":""}</li>`).join("")}</ul>
+      </div>
+    </section>
+    <section id="stuck">
+      <h2>If you're stuck</h2>
+      <div class="panel">
+        <ul>
+          <li><strong>Nothing to cast:</strong> Play a land and pass. Setup turns are fine.</li>
+          <li><strong>Commander is expensive:</strong> ${ramp.length ? "Use " + ramp.slice(0,2).map(c=>c.name).join(" or ") + " first." : "Ramp first, then cast it."}</li>
+          <li><strong>Someone is scary:</strong> Hold your removal. Don't force a big play.</li>
+          <li><strong>Not sure what to do:</strong> Search a card above and see which play it fits.</li>
+        </ul>
+      </div>
+    </section>
+    <p class="note" style="margin-top:20px">Generated from Archidekt. Search filters the plays.</p>
+  </main>
+  <script>
+    const q = document.getElementById("q");
+    const plays = document.querySelectorAll(".play");
+    if (q) q.addEventListener("input", () => {
+      const term = q.value.toLowerCase();
+      plays.forEach(p => p.style.display = p.textContent.toLowerCase().includes(term) ? "" : "none");
+    });
+  </script>
+</body>
+</html>`;
+}
+
+function renderResult(deck) {
+  const html = buildPlaybookHTML(deck);
+  const blob = new Blob([html], { type: "text/html" });
+  const objectUrl = URL.createObjectURL(blob);
+  const commander = findCommander(deck);
+  resultEl.innerHTML = `
+    <p>Ready: <strong>${commander}</strong> (${deck.name || "deck"})</p>
+    <a href="${objectUrl}" download="${commander.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-playbook.html"><button>Download Playbook</button></a>
+    <button class="secondary" id="preview">Preview</button>
+  `;
+  resultEl.hidden = false;
+  document.getElementById("preview").onclick = () => window.open(objectUrl, "_blank");
+  setStatus("Done. Download or preview the playbook.");
+}
+
+
+
+goBtn.addEventListener("click", async () => {
+  const url = document.getElementById("url").value.trim();
+  const id = extractId(url);
+  if (!id) {
+    setStatus("Please paste a valid Archidekt deck URL.", true);
+    return;
+  }
+  goBtn.disabled = true;
+  resultEl.hidden = true;
+  setStatus("Fetching deck…");
+  try {
+    const deck = await fetchDeck(id);
+    if (deck.private) {
+      setStatus("This deck is private. Only public decks can be fetched.", true);
+      goBtn.disabled = false;
+      return;
+    }
+    setStatus("Building playbook…");
+    renderResult(deck);
+  } catch (err) {
+    console.error(err);
+    setStatus("Could not fetch the deck. Make sure it is public. Error: " + (err.message || err), true);
+  } finally {
+    goBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
